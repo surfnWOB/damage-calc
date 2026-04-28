@@ -1,3 +1,4 @@
+import { type ShowdexCalcMods, modBaseDamage } from '../showdex';
 import type {Generation, AbilityName, StatID, Terrain} from '../data/interface';
 import {toID} from '../util';
 import {
@@ -32,7 +33,7 @@ import {
   checkRawStatChanges,
   computeFinalStats,
   countBoosts,
-  getBaseDamage,
+  // getBaseDamage,
   getStatDescriptionText,
   getFinalDamage,
   getModifiedStat,
@@ -54,7 +55,8 @@ export function calculateSMSSSV(
   attacker: Pokemon,
   defender: Pokemon,
   move: Move,
-  field: Field
+  field: Field,
+  mods?: ShowdexCalcMods,
 ) {
   // #region Initial
 
@@ -124,9 +126,9 @@ export function calculateSMSSSV(
     move.category = attacker.stats.atk > attacker.stats.spa ? 'Physical' : 'Special';
   }
 
-  const result = new Result(gen, attacker, defender, move, field, 0, desc);
+  const result = new Result(gen, attacker, defender, move, field, 0, desc, mods);
 
-  if (move.category === 'Status' && !move.named('Nature Power')) {
+  if (move.category === 'Status' && !move.named('Nature Power', 'Pain Split')) {
     return result;
   }
 
@@ -567,8 +569,10 @@ export function calculateSMSSSV(
     defender,
     move,
     field,
-    hasAteAbilityTypeChange,
-    desc
+    false, // hasAteAbilityTypeChange, // handled in Showdex via calcMoveBasePower()
+    desc,
+    undefined, // hits; defaults to 1
+    mods,
   );
   if (basePower === 0) {
     return result;
@@ -598,7 +602,8 @@ export function calculateSMSSSV(
     move,
     field,
     desc,
-    isCritical
+    isCritical,
+    mods,
   );
 
   // FIXME: this is incorrect, should be move.flags.heal, not move.drain
@@ -661,7 +666,7 @@ export function calculateSMSSSV(
     desc.attackerAbility = attacker.ability;
   }
 
-  const damage = [];
+  const damage: number[] = [];
   for (let i = 0; i < 16; i++) {
     damage[i] =
       getFinalDamage(baseDamage, i, typeEffectiveness, applyBurn, stabMod, finalMod, protect);
@@ -681,6 +686,7 @@ export function calculateSMSSSV(
       numAttacks = move.hits;
     }
     let usedItems = [false, false];
+    let totalModBp = desc.moveBP;
     const damageMatrix = [damage];
     for (let times = 1; times < numAttacks; times++) {
       usedItems = checkMultihitBoost(gen, attacker, defender, move,
@@ -711,7 +717,8 @@ export function calculateSMSSSV(
         field,
         hasAteAbilityTypeChange,
         desc,
-        times + 1
+        times + 1,
+        mods,
       );
       const newBaseDamage = calculateBaseDamageSMSSSV(
         gen,
@@ -723,7 +730,8 @@ export function calculateSMSSSV(
         move,
         field,
         desc,
-        isCritical
+        isCritical,
+        mods,
       );
       const newFinalMods = calculateFinalModsSMSSSV(
         gen,
@@ -738,7 +746,7 @@ export function calculateSMSSSV(
       );
       const newFinalMod = chainMods(newFinalMods, 41, 131072);
 
-      const damageArray = [];
+      const damageArray: number[] = [];
       for (let i = 0; i < 16; i++) {
         const newFinalDamage = getFinalDamage(
           newBaseDamage,
@@ -752,8 +760,12 @@ export function calculateSMSSSV(
         damageArray[i] = newFinalDamage;
       }
       damageMatrix[times] = damageArray;
+      if (mods?.hitBasePowers?.length) {
+        totalModBp += (desc.moveBP || 0);
+      }
     }
     result.damage = damageMatrix;
+    desc.moveBP = totalModBp;
     desc.defenseBoost = origDefBoost;
     desc.attackBoost = origAtkBoost;
   }
@@ -773,6 +785,7 @@ export function calculateBasePowerSMSSSV(
   hasAteAbilityTypeChange: boolean,
   desc: RawDesc,
   hit = 1,
+  mods?: ShowdexCalcMods,
 ) {
   const turnOrder = attacker.stats.spe > defender.stats.spe ? 'first' : 'last';
 
@@ -945,20 +958,20 @@ export function calculateBasePowerSMSSSV(
       desc.moveName = 'Tri Attack';
     }
     break;
-  case 'Water Shuriken':
-    basePower = attacker.named('Greninja-Ash') && attacker.hasAbility('Battle Bond') ? 20 : 15;
-    desc.moveBP = basePower;
-    break;
+  // case 'Water Shuriken': // handled in Showdex via calcMoveBasePower()
+  //   basePower = attacker.named('Greninja-Ash') && attacker.hasAbility('Battle Bond') ? 20 : 15;
+  //   desc.moveBP = basePower;
+  //   break;
   // Triple Axel's damage increases after each consecutive hit (20, 40, 60)
-  case 'Triple Axel':
-    basePower = hit * 20;
-    desc.moveBP = move.hits === 2 ? 60 : move.hits === 3 ? 120 : 20;
-    break;
+  // case 'Triple Axel': // handled in Showdex via calcMoveHitBasePowers()
+  //   basePower = hit * 20;
+  //   desc.moveBP = move.hits === 2 ? 60 : move.hits === 3 ? 120 : 20;
+  //   break;
   // Triple Kick's damage increases after each consecutive hit (10, 20, 30)
-  case 'Triple Kick':
-    basePower = hit * 10;
-    desc.moveBP = move.hits === 2 ? 30 : move.hits === 3 ? 60 : 10;
-    break;
+  // case 'Triple Kick': // handled in Showdex via calcMoveHitBasePowers()
+  //   basePower = hit * 10;
+  //   desc.moveBP = move.hits === 2 ? 30 : move.hits === 3 ? 60 : 10;
+  //   break;
   case 'Crush Grip':
   case 'Wring Out':
     basePower = 100 * Math.floor((defender.curHP() * 4096) / defender.maxHP());
@@ -977,18 +990,22 @@ export function calculateBasePowerSMSSSV(
   default:
     basePower = move.bp;
   }
+  if (move.hits > 1 && mods?.hitBasePowers?.length) {
+    // note: intentionally falling back to move.bp (& not basePower)
+    basePower = mods.hitBasePowers[hit - 1] ?? move.bp;
+  }
   if (basePower === 0) {
     return 0;
   }
-  if (move.named(
-    'Breakneck Blitz', 'Bloom Doom', 'Inferno Overdrive', 'Hydro Vortex', 'Gigavolt Havoc',
-    'Subzero Slammer', 'Supersonic Skystrike', 'Savage Spin-Out', 'Acid Downpour', 'Tectonic Rage',
-    'Continental Crush', 'All-Out Pummeling', 'Shattered Psyche', 'Never-Ending Nightmare',
-    'Devastating Drake', 'Black Hole Eclipse', 'Corkscrew Crash', 'Twinkle Tackle'
-  ) || move.isMax) {
-    // show z-move power in description
-    desc.moveBP = move.bp;
-  }
+  // if (move.named( // we'll always include the desc.moveBP in case something's awry, so we'll be able to see it on Showdex's end
+  //   'Breakneck Blitz', 'Bloom Doom', 'Inferno Overdrive', 'Hydro Vortex', 'Gigavolt Havoc',
+  //   'Subzero Slammer', 'Supersonic Skystrike', 'Savage Spin-Out', 'Acid Downpour', 'Tectonic Rage',
+  //   'Continental Crush', 'All-Out Pummeling', 'Shattered Psyche', 'Never-Ending Nightmare',
+  //   'Devastating Drake', 'Black Hole Eclipse', 'Corkscrew Crash', 'Twinkle Tackle'
+  // ) || move.isMax) {
+  //   // show z-move power in description
+  //   desc.moveBP = move.bp;
+  // }
   const bpMods = calculateBPModsSMSSSV(
     gen,
     attacker,
@@ -1014,6 +1031,7 @@ export function calculateBasePowerSMSSSV(
     basePower = 60;
     desc.moveBP = 60;
   }
+  desc.moveBP = basePower;
   return basePower;
 }
 
@@ -1300,11 +1318,12 @@ export function calculateAttackSMSSSV(
 ) {
   let attack: number;
   const attackSource = move.named('Foul Play') ? defender : attacker;
-  const attackStat =
+  // Body Press in Wonder Room uses normal Def, which checkRawStatChanges has moved to SpD
+  const attackStat = move.overrideOffensiveStat || (
     move.named('Body Press')
       ? (field.isWonderRoom ? 'spd' : 'def')
-      : (move.category === 'Special' ? 'spa' : 'atk');
-  // Body Press in Wonder Room uses normal Def, which checkRawStatChanges has moved to SpD
+      : (move.category === 'Special' ? 'spa' : 'atk')
+  );
   desc.attackEVs =
     move.named('Foul Play')
       ? getStatDescriptionText(
@@ -1506,7 +1525,8 @@ export function calculateDefenseSMSSSV(
 ) {
   let defense: number;
   const hitsPhysical = move.overrideDefensiveStat === 'def' || move.category === 'Physical';
-  const defenseStat = hitsPhysical ? 'def' : 'spd';
+  // note: Showdex will always respect the user's override if specified, regardless of Wonder Room --keith
+  const defenseStat = move.overrideDefensiveStat || (hitsPhysical ? 'def' : 'spd');
   desc.defenseEVs = getStatDescriptionText(
     gen, defender, defenseStat, field.defenderSide.isPowerTrick, field.isWonderRoom
   );
@@ -1555,10 +1575,10 @@ export function calculateDfModsSMSSSV(
   gen: Generation,
   attacker: Pokemon,
   defender: Pokemon,
-  move: Move,
+  _move: Move, // unused as of commit 7eceb6b on 2025/08/04
   field: Field,
   desc: RawDesc,
-  isCritical = false,
+  _isCritical = false, // unused as of commit 7eceb6b on 2025/08/04
   hitsPhysical = false
 ) {
   const dfMods = [];
@@ -1635,7 +1655,7 @@ export function calculateDfModsSMSSSV(
 }
 
 function calculateBaseDamageSMSSSV(
-  gen: Generation,
+  _gen: Generation, // unused as of commit 7eceb6b on 2025/08/04
   attacker: Pokemon,
   defender: Pokemon,
   basePower: number,
@@ -1645,8 +1665,13 @@ function calculateBaseDamageSMSSSV(
   field: Field,
   desc: RawDesc,
   isCritical = false,
+  mods?: ShowdexCalcMods,
 ) {
-  let baseDamage = getBaseDamage(attacker.level, basePower, attack, defense);
+  // let baseDamage = getBaseDamage(attacker.level, basePower, attack, defense);
+  let baseDamage = modBaseDamage('gen789', mods)(attacker.level, basePower, attack, defense);
+  if (mods?.strikes?.length) {
+    desc.hits = mods.strikes.length;
+  }
   const isSpread = field.gameType !== 'Singles' &&
      ['allAdjacent', 'allAdjacentFoes'].includes(move.target);
   if (isSpread) {
@@ -1687,7 +1712,7 @@ function calculateBaseDamageSMSSSV(
 }
 
 export function calculateFinalModsSMSSSV(
-  gen: Generation,
+  _gen: Generation, // unused as of commit 7eceb6b on 2025/08/04
   attacker: Pokemon,
   defender: Pokemon,
   move: Move,
