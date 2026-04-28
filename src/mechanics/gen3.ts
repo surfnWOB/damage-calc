@@ -209,11 +209,11 @@ export function calculateADV(
       }
       damageMatrix[times] = damageArray;
       if (mods?.hitBasePowers?.length) {
-        totalModBp += (desc.moveBP || 0);
+        totalModBp = (totalModBp ?? 0) + (desc.moveBP || 0);
       }
     }
     result.damage = damageMatrix;
-    desc.moveBP = totalModBp;
+    if (mods?.hitBasePowers?.length) desc.moveBP = totalModBp;
     desc.defenseBoost = origDefBoost;
     desc.attackBoost = origAtkBoost;
   }
