@@ -1,3 +1,4 @@
+import { type ShowdexCalcMods, modBaseDamage } from '../showdex';
 import type {Generation, AbilityName} from '../data/interface';
 import {getItemBoostType, getNaturalGift, getFlingPower, getBerryResistType} from '../items';
 import type {RawDesc} from '../desc';
@@ -26,7 +27,8 @@ export function calculateDPP(
   attacker: Pokemon,
   defender: Pokemon,
   move: Move,
-  field: Field
+  field: Field,
+  mods?: ShowdexCalcMods,
 ) {
   // #region Initial
 
@@ -51,9 +53,9 @@ export function calculateDPP(
     defenderName: defender.name,
   };
 
-  const result = new Result(gen, attacker, defender, move, field, 0, desc);
+  const result = new Result(gen, attacker, defender, move, field, 0, desc, mods);
 
-  if (move.category === 'Status' && !move.named('Nature Power')) {
+  if (move.category === 'Status' && !move.named('Nature Power', 'Pain Split')) {
     return result;
   }
 
@@ -205,7 +207,7 @@ export function calculateDPP(
   // #endregion
   // #region Base Power
 
-  let basePower = calculateBasePowerDPP(gen, attacker, defender, move, field, desc);
+  let basePower = calculateBasePowerDPP(gen, attacker, defender, move, field, desc, undefined, mods);
   if (basePower === 0) {
     return result;
   }
@@ -223,9 +225,14 @@ export function calculateDPP(
   // #endregion
   // #region Damage
 
-  let baseDamage = Math.floor(
-    Math.floor((Math.floor((2 * attacker.level) / 5 + 2) * basePower * attack) / 50) / defense
-  );
+  // let baseDamage = Math.floor(
+  //   Math.floor((Math.floor((2 * attacker.level) / 5 + 2) * basePower * attack) / 50) / defense
+  // );
+  let baseDamage = modBaseDamage('gen4', mods)(attacker.level, basePower, attack, defense);
+
+  if (mods?.strikes?.length) {
+    desc.hits = mods.strikes.length;
+  }
 
   if (attacker.hasStatus('brn') && isPhysical && !attacker.hasAbility('Guts')) {
     baseDamage = Math.floor(baseDamage * 0.5);
@@ -294,11 +301,12 @@ export function calculateDPP(
       numAttacks = move.hits;
     }
     let usedItems = [false, false];
+    let totalModBp = desc.moveBP;
     const damageMatrix = [damage];
     for (let times = 1; times < numAttacks; times++) {
       usedItems = checkMultihitBoost(gen, attacker, defender, move,
         field, desc, usedItems[0], usedItems[1]);
-      let newBasePower = calculateBasePowerDPP(gen, attacker, defender, move, field, desc);
+      let newBasePower = calculateBasePowerDPP(gen, attacker, defender, move, field, desc, times + 1, mods);
       newBasePower = calculateBPModsDPP(attacker, defender, move, field, desc, newBasePower);
       const newAtk = calculateAttackDPP(gen, attacker, defender, move, field, desc, isCritical);
       let baseDamage = Math.floor(
@@ -312,7 +320,7 @@ export function calculateDPP(
       }
       baseDamage = calculateFinalModsDPP(baseDamage, attacker, move, field, desc, isCritical);
 
-      const damageArray = [];
+      const damageArray: number[] = [];
       for (let i = 0; i < 16; i++) {
         let newFinalDamage = 0;
         newFinalDamage = Math.floor((baseDamage * (85 + i)) / 100);
@@ -326,8 +334,12 @@ export function calculateDPP(
         damageArray[i] = newFinalDamage;
       }
       damageMatrix[times] = damageArray;
+      if (mods?.hitBasePowers?.length) {
+        totalModBp += (desc.moveBP || 0);
+      }
     }
     result.damage = damageMatrix;
+    desc.moveBP = totalModBp;
     desc.defenseBoost = origDefBoost;
     desc.attackBoost = origAtkBoost;
   }
@@ -345,6 +357,7 @@ export function calculateBasePowerDPP(
   field: Field,
   desc: RawDesc,
   hit = 1,
+  mods?: ShowdexCalcMods,
 ) {
   let basePower = move.bp;
   const turnOrder = attacker.stats.spe > defender.stats.spe ? 'first' : 'last';
@@ -420,10 +433,10 @@ export function calculateBasePowerDPP(
     basePower = Math.floor((defender.curHP() * 120) / defender.maxHP()) + 1;
     desc.moveBP = basePower;
     break;
-  case 'Triple Kick':
-    basePower = hit * 10;
-    desc.moveBP = move.hits === 2 ? 30 : move.hits === 3 ? 60 : 10;
-    break;
+  // case 'Triple Kick': // handled in Showdex via calcMoveHitBasePowers()
+  //   basePower = hit * 10;
+  //   desc.moveBP = move.hits === 2 ? 30 : move.hits === 3 ? 60 : 10;
+  //   break;
   case 'Weather Ball':
     basePower = move.bp * (field.weather ? 2 : 1);
     desc.moveBP = basePower;
@@ -431,6 +444,11 @@ export function calculateBasePowerDPP(
   default:
     basePower = move.bp;
   }
+  if (mods?.hitBasePowers?.length) {
+    // note: intentionally falling back to move.bp (& not basePower)
+    basePower = mods.hitBasePowers[hit - 1] ?? move.bp;
+  }
+  desc.moveBP = basePower;
   return basePower;
 }
 
@@ -505,7 +523,7 @@ export function calculateBPModsDPP(
     }
     desc.attackerAbility = attacker.ability;
   }
-
+  desc.moveBP = basePower;
   return basePower;
 }
 
@@ -519,7 +537,7 @@ export function calculateAttackDPP(
   isCritical = false
 ) {
   const isPhysical = move.category === 'Physical';
-  const attackStat = isPhysical ? 'atk' : 'spa';
+  const attackStat = move.overrideOffensiveStat || (isPhysical ? 'atk' : 'spa');
   desc.attackEVs =
     getStatDescriptionText(gen, attacker, attackStat, field.attackerSide.isPowerTrick);
   if (field.attackerSide.isPowerTrick && isPhysical) {
@@ -592,7 +610,7 @@ export function calculateDefenseDPP(
   isCritical = false
 ) {
   const isPhysical = move.category === 'Physical';
-  const defenseStat = isPhysical ? 'def' : 'spd';
+  const defenseStat = move.overrideDefensiveStat || (isPhysical ? 'def' : 'spd');
   desc.defenseEVs =
     getStatDescriptionText(gen, defender, defenseStat, field.defenderSide.isPowerTrick);
   let defense = defender.rawStats[defenseStat];
